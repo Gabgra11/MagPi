@@ -1,1 +1,1 @@
-# BirdReview
+# MagPi
