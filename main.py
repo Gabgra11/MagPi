@@ -28,7 +28,7 @@ SAMPLES_QUEUE_SIZE = 10  # ~30 seconds of audio buffered
 RESULTS_QUEUE_SIZE = 100  # Should be plenty for detections
 
 # Detection thresholds
-MIN_CONFIDENCE = 0.8  # BirdNET confidence threshold
+MIN_CONFIDENCE = 0.6  # BirdNET confidence threshold
 
 # Deduplication settings
 DEDUP_METHOD = 'time_window'  # 'time_window' or 'temporal_overlap'
