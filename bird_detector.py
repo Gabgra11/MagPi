@@ -22,13 +22,14 @@ CHUNK_DURATION = 3.0  # seconds per analysis chunk
 OVERLAP = 0.5  # 50% overlap between chunks
 CHANNELS = 1
 DTYPE = 'float32'
+AUDIO_DEVICE = 1  # USB webcam microphone
 
 # Queue sizes (tune based on your Pi's performance)
 SAMPLES_QUEUE_SIZE = 10  # ~30 seconds of audio buffered
 RESULTS_QUEUE_SIZE = 100  # Should be plenty for detections
 
 # Detection thresholds
-MIN_CONFIDENCE = 0.6  # BirdNET confidence threshold
+MIN_CONFIDENCE = 0.5  # BirdNET confidence threshold (lowered for testing)
 
 # Deduplication settings
 DEDUP_METHOD = 'time_window'  # 'time_window' or 'temporal_overlap'
@@ -71,6 +72,9 @@ def recording_worker(samples_queue, stop_event):
     Ensures no gaps in audio coverage.
     """
     print("Recording worker started")
+
+    print(f"Using audio device: {sd.query_devices(AUDIO_DEVICE)}")
+
     
     chunk_samples = int(SAMPLE_RATE * CHUNK_DURATION)
     hop_samples = int(SAMPLE_RATE * CHUNK_DURATION * (1 - OVERLAP))
@@ -110,6 +114,7 @@ def recording_worker(samples_queue, stop_event):
     
     # Start continuous recording
     with sd.InputStream(samplerate=SAMPLE_RATE,
+                       device=AUDIO_DEVICE,
                        channels=CHANNELS,
                        dtype=DTYPE,
                        callback=audio_callback,
@@ -142,8 +147,17 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
             continue
         
         try:
+            # Debug: Check audio data
+            audio_level = np.abs(audio_data).mean()
+            audio_max = np.abs(audio_data).max()
+            
+            if processed_count % 20 == 0:  # Every 20 samples
+                print(f"Worker {worker_id}: Audio - mean: {audio_level:.4f}, "
+                      f"max: {audio_max:.4f}, shape: {audio_data.shape}, "
+                      f"dtype: {audio_data.dtype}")
+            
             # Create RecordingBuffer object for analysis
-            # RecordingBuffer expects: analyzer, buffer, min_conf (and optional lat/lon/date)
+            # RecordingBuffer expects: analyzer, buffer, rate, min_conf (and optional lat/lon/date)
             recording = RecordingBuffer(
                 analyzer,
                 audio_data,
@@ -153,10 +167,14 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
             
             recording.analyze()
             
+            # Log detection results
+            num_detections = len(recording.detections) if recording.detections else 0
+            if processed_count % 20 == 0 or num_detections > 0:
+                print(f"Worker {worker_id}: Processed sample, detections: {num_detections}")
+            
             # Process detections
             if recording.detections:
                 for detection in recording.detections:
-                    print("Processing detection:", detection)
                     result = {
                         'timestamp': timestamp,
                         'common_name': detection['common_name'],
