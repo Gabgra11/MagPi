@@ -15,6 +15,8 @@ import numpy as np
 import sounddevice as sd
 from birdnetlib import RecordingBuffer
 from birdnetlib.analyzer import Analyzer
+import os
+from scipy.io.wavfile import write as wav_write
 
 # Configuration
 SAMPLE_RATE = 48000
@@ -37,6 +39,7 @@ DEDUP_WINDOW_SECONDS = 5.0  # For time_window method: ignore same species within
 
 # Database configuration
 DB_PATH = 'bird_detections.db'
+AUDIO_SAVE_DIR = 'detected_audio'
 
 
 def setup_database():
@@ -64,6 +67,8 @@ def setup_database():
     conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
+    os.makedirs(AUDIO_SAVE_DIR, exist_ok=True)
+    print(f"Audio save directory created at {AUDIO_SAVE_DIR}")
 
 
 def recording_worker(samples_queue, stop_event):
@@ -72,9 +77,7 @@ def recording_worker(samples_queue, stop_event):
     Ensures no gaps in audio coverage.
     """
     print("Recording worker started")
-
     print(f"Using audio device: {sd.query_devices(AUDIO_DEVICE)}")
-
     
     chunk_samples = int(SAMPLE_RATE * CHUNK_DURATION)
     hop_samples = int(SAMPLE_RATE * CHUNK_DURATION * (1 - OVERLAP))
@@ -105,7 +108,7 @@ def recording_worker(samples_queue, stop_event):
                 try:
                     samples_queue.put((timestamp, chunk), timeout=1.0)
                 except Full:
-                    print("WARNING: Samples queue full! Analysis cannot keep up.", 
+                    print("WARNING: Samples queue full! Analysis cannot keep up.",
                           file=sys.stderr)
                 
                 # Shift buffer by hop size to create overlap
@@ -150,12 +153,10 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
             # Debug: Check audio data
             audio_level = np.abs(audio_data).mean()
             audio_max = np.abs(audio_data).max()
-            
             if processed_count % 20 == 0:  # Every 20 samples
                 print(f"Worker {worker_id}: Audio - mean: {audio_level:.4f}, "
                       f"max: {audio_max:.4f}, shape: {audio_data.shape}, "
                       f"dtype: {audio_data.dtype}")
-            
             # Create RecordingBuffer object for analysis
             # RecordingBuffer expects: analyzer, buffer, rate, min_conf (and optional lat/lon/date)
             recording = RecordingBuffer(
@@ -166,15 +167,22 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
             )
             
             recording.analyze()
-            
             # Log detection results
             num_detections = len(recording.detections) if recording.detections else 0
             if processed_count % 20 == 0 or num_detections > 0:
                 print(f"Worker {worker_id}: Processed sample, detections: {num_detections}")
-            
+
             # Process detections
             if recording.detections:
+                # Save audio clip for each detection
                 for detection in recording.detections:
+                    # Save audio segment as WAV file
+                    species = detection['common_name'].replace(' ', '_')
+                    det_time = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+                    filename = f"{det_time}_{species}_worker{worker_id}.wav"
+                    filepath = os.path.join(AUDIO_SAVE_DIR, filename)
+                    wav_write(filepath, SAMPLE_RATE, (audio_data * 32767).astype(np.int16))
+                    print(f"Saved detected audio: {filepath}")
                     result = {
                         'timestamp': timestamp,
                         'common_name': detection['common_name'],
@@ -222,8 +230,8 @@ def database_worker(results_queue, stop_event):
         window_start = (result_time.timestamp() - DEDUP_WINDOW_SECONDS)
         
         cursor.execute(
-            '''SELECT COUNT(*) FROM detections 
-               WHERE scientific_name = ? 
+            '''SELECT COUNT(*) FROM detections
+               WHERE scientific_name = ?
                AND strftime('%s', timestamp) > ?''',
             (result['scientific_name'], window_start)
         )
@@ -242,9 +250,9 @@ def database_worker(results_queue, stop_event):
         # Check for overlapping detections of same species
         # Overlap occurs if: new_start < existing_end AND new_end > existing_start
         cursor.execute(
-            '''SELECT id, confidence, start_time, end_time, timestamp 
-               FROM detections 
-               WHERE scientific_name = ? 
+            '''SELECT id, confidence, start_time, end_time, timestamp
+               FROM detections
+               WHERE scientific_name = ?
                AND strftime('%s', timestamp) + end_time > ?
                AND strftime('%s', timestamp) + start_time < ?
                ORDER BY confidence DESC
@@ -282,13 +290,13 @@ def database_worker(results_queue, stop_event):
             pass
         
         # Write batch if it's full or enough time has passed
-        if batch and (len(batch) >= batch_size or 
+        if batch and (len(batch) >= batch_size or
                      time.time() - last_commit > commit_interval):
             try:
                 cursor.executemany(
-                    '''INSERT INTO detections 
+                    '''INSERT INTO detections
                        (timestamp, common_name, scientific_name, confidence, start_time, end_time)
-                       VALUES (:timestamp, :common_name, :scientific_name, :confidence, 
+                       VALUES (:timestamp, :common_name, :scientific_name, :confidence,
                                :start_time, :end_time)''',
                     batch
                 )
@@ -305,9 +313,9 @@ def database_worker(results_queue, stop_event):
     # Write any remaining results
     if batch:
         cursor.executemany(
-            '''INSERT INTO detections 
+            '''INSERT INTO detections
                (timestamp, common_name, scientific_name, confidence, start_time, end_time)
-               VALUES (:timestamp, :common_name, :scientific_name, :confidence, 
+               VALUES (:timestamp, :common_name, :scientific_name, :confidence,
                        :start_time, :end_time)''',
             batch
         )
@@ -371,7 +379,7 @@ def main():
     workers = []
     
     # Recording worker
-    rec_worker = Process(target=recording_worker, 
+    rec_worker = Process(target=recording_worker,
                         args=(samples_queue, stop_event),
                         name="Recorder")
     workers.append(rec_worker)
