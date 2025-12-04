@@ -17,21 +17,25 @@ from birdnetlib import RecordingBuffer
 from birdnetlib.analyzer import Analyzer
 import os
 from scipy.io.wavfile import write as wav_write
+import traceback
+
+# Force unbuffered output for systemd
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 # Configuration
-SAMPLE_RATE = 48000
+SAMPLE_RATE = 16000
 CHUNK_DURATION = 3.0  # seconds per analysis chunk
 OVERLAP = 0.5  # 50% overlap between chunks
 CHANNELS = 1
 DTYPE = 'float32'
-AUDIO_DEVICE = 1  # USB webcam microphone
 
 # Queue sizes (tune based on your Pi's performance)
 SAMPLES_QUEUE_SIZE = 10  # ~30 seconds of audio buffered
 RESULTS_QUEUE_SIZE = 100  # Should be plenty for detections
 
 # Detection thresholds
-MIN_CONFIDENCE = 0.5  # BirdNET confidence threshold (lowered for testing)
+MIN_CONFIDENCE = 0.01  # BirdNET confidence threshold (lowered for testing)
 
 # Deduplication settings
 DEDUP_METHOD = 'time_window'  # 'time_window' or 'temporal_overlap'
@@ -40,6 +44,43 @@ DEDUP_WINDOW_SECONDS = 5.0  # For time_window method: ignore same species within
 # Database configuration
 DB_PATH = 'bird_detections.db'
 AUDIO_SAVE_DIR = 'detected_audio'
+
+
+def log(msg):
+    """Helper function to ensure logging works in multiprocessing"""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def find_usb_audio_device():
+    """Find USB microphone device index"""
+    try:
+        devices = sd.query_devices()
+        log("\n=== Available Audio Devices ===")
+        for i, device in enumerate(devices):
+            log(f"[{i}] {device['name']}")
+            log(f"    Inputs: {device['max_input_channels']}, Outputs: {device['max_output_channels']}")
+        log("=" * 40 + "\n")
+        
+        for i, device in enumerate(devices):
+            name = device['name'].lower()
+            if 'usb' in name or 'webcam' in name or '0x' in name:
+                if device['max_input_channels'] > 0:
+                    log(f"Found USB audio device at index {i}: {device['name']}")
+                    return i
+        
+        # If no USB device found, find default input
+        default_input = sd.default.device[0]
+        log(f"WARNING: No USB device found, using default input device: {default_input}")
+        return default_input
+    except Exception as e:
+        log(f"ERROR detecting audio device: {e}")
+        traceback.print_exc()
+        log("Falling back to device index 1")
+        return 1
+
+
+# Auto-detect audio device or use hardcoded value
+AUDIO_DEVICE = find_usb_audio_device() if os.getenv('AUTO_DETECT_AUDIO', '1') == '1' else 1
 
 
 def setup_database():
@@ -66,9 +107,9 @@ def setup_database():
     
     conn.commit()
     conn.close()
-    print(f"Database initialized at {DB_PATH}")
+    log(f"Database initialized at {DB_PATH}")
     os.makedirs(AUDIO_SAVE_DIR, exist_ok=True)
-    print(f"Audio save directory created at {AUDIO_SAVE_DIR}")
+    log(f"Audio save directory created at {AUDIO_SAVE_DIR}")
 
 
 def recording_worker(samples_queue, stop_event):
@@ -76,8 +117,33 @@ def recording_worker(samples_queue, stop_event):
     Continuously records audio and pushes overlapping chunks to queue.
     Ensures no gaps in audio coverage.
     """
-    print("Recording worker started")
-    print(f"Using audio device: {sd.query_devices(AUDIO_DEVICE)}")
+    # Reconfigure stdout/stderr for this process
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+    
+    # Force ALSA backend for systemd compatibility
+    os.environ['SDL_AUDIODRIVER'] = 'alsa'
+    
+    try:
+        log("Recording worker started")
+        log(f"Using audio device index: {AUDIO_DEVICE}")
+        
+        # Query device info
+        devices = sd.query_devices()
+        device_info = devices[AUDIO_DEVICE]
+        log(f"Device info: {device_info}")
+        
+        # Verify device has input channels
+        if device_info['max_input_channels'] < 1:
+            log(f"ERROR: Device {AUDIO_DEVICE} has no input channels!")
+            stop_event.set()
+            return
+            
+    except Exception as e:
+        log(f"ERROR in recording worker initialization: {e}")
+        traceback.print_exc()
+        stop_event.set()
+        return
     
     chunk_samples = int(SAMPLE_RATE * CHUNK_DURATION)
     hop_samples = int(SAMPLE_RATE * CHUNK_DURATION * (1 - OVERLAP))
@@ -89,7 +155,7 @@ def recording_worker(samples_queue, stop_event):
     def audio_callback(indata, frames, time_info, status):
         nonlocal buffer_pos
         if status:
-            print(f"Recording status: {status}", file=sys.stderr)
+            log(f"Recording status: {status}")
         
         # Copy incoming audio to buffer
         audio = indata[:, 0].copy()  # Get mono channel
@@ -108,27 +174,74 @@ def recording_worker(samples_queue, stop_event):
                 try:
                     samples_queue.put((timestamp, chunk), timeout=1.0)
                 except Full:
-                    print("WARNING: Samples queue full! Analysis cannot keep up.",
-                          file=sys.stderr)
+                    log("WARNING: Samples queue full! Analysis cannot keep up.")
                 
                 # Shift buffer by hop size to create overlap
                 buffer[:chunk_samples - hop_samples] = buffer[hop_samples:]
                 buffer_pos = chunk_samples - hop_samples
     
     # Start continuous recording
-    with sd.InputStream(samplerate=SAMPLE_RATE,
-                       device=AUDIO_DEVICE,
-                       channels=CHANNELS,
-                       dtype=DTYPE,
-                       callback=audio_callback,
-                       blocksize=2048):
+    try:
+        log("Opening audio stream...")
+        log(f"Stream parameters: rate={SAMPLE_RATE}, device={AUDIO_DEVICE}, channels={CHANNELS}, dtype={DTYPE}")
         
-        print(f"Recording started: {SAMPLE_RATE}Hz, {CHUNK_DURATION}s chunks, {OVERLAP*100}% overlap")
+        # Set a timeout for stream initialization
+        import threading
+        
+        stream = None
+        exception_holder = [None]
+        
+        def open_stream():
+            try:
+                nonlocal stream
+                stream = sd.InputStream(
+                    samplerate=SAMPLE_RATE,
+                    device=AUDIO_DEVICE,
+                    channels=CHANNELS,
+                    dtype=DTYPE,
+                    callback=audio_callback,
+                    blocksize=2048,
+                    latency='high'
+                )
+                stream.start()
+            except Exception as e:
+                exception_holder[0] = e
+        
+        # Try to open stream with timeout
+        thread = threading.Thread(target=open_stream, daemon=True)
+        thread.start()
+        thread.join(timeout=10.0)  # 10 second timeout
+        
+        if thread.is_alive():
+            log("ERROR: Audio stream open timed out after 10 seconds!")
+            log("This usually means ALSA/audio system is blocked.")
+            stop_event.set()
+            return
+        
+        if exception_holder[0]:
+            raise exception_holder[0]
+        
+        if stream is None:
+            log("ERROR: Stream object is None after thread completion")
+            stop_event.set()
+            return
+        
+        log(f"Recording started: {SAMPLE_RATE}Hz, {CHUNK_DURATION}s chunks, {OVERLAP*100}% overlap")
         
         while not stop_event.is_set():
             time.sleep(0.1)
+        
+        log("Stopping stream...")
+        stream.stop()
+        stream.close()
+        log("Stream closed")
+        
+    except Exception as e:
+        log(f"FATAL ERROR starting audio stream: {e}")
+        traceback.print_exc()
+        stop_event.set()  # Signal other workers to stop
     
-    print("Recording worker stopped")
+    log("Recording worker stopped")
 
 
 def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
@@ -136,10 +249,21 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
     Pulls audio samples from queue and analyzes for bird calls.
     Pushes detections to results queue.
     """
-    print(f"Analyzing worker {worker_id} started")
+    # Reconfigure stdout/stderr for this process
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
     
-    # Initialize BirdNET analyzer
-    analyzer = Analyzer()
+    log(f"Analyzing worker {worker_id} started")
+    
+    try:
+        # Initialize BirdNET analyzer
+        log(f"Worker {worker_id}: Initializing BirdNET analyzer...")
+        analyzer = Analyzer()
+        log(f"Worker {worker_id}: BirdNET analyzer initialized")
+    except Exception as e:
+        log(f"ERROR: Worker {worker_id} failed to initialize analyzer: {e}")
+        traceback.print_exc()
+        return
     
     processed_count = 0
     
@@ -154,11 +278,11 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
             audio_level = np.abs(audio_data).mean()
             audio_max = np.abs(audio_data).max()
             if processed_count % 20 == 0:  # Every 20 samples
-                print(f"Worker {worker_id}: Audio - mean: {audio_level:.4f}, "
-                      f"max: {audio_max:.4f}, shape: {audio_data.shape}, "
-                      f"dtype: {audio_data.dtype}")
+                log(f"Worker {worker_id}: Audio - mean: {audio_level:.4f}, "
+                    f"max: {audio_max:.4f}, shape: {audio_data.shape}, "
+                    f"dtype: {audio_data.dtype}")
+            
             # Create RecordingBuffer object for analysis
-            # RecordingBuffer expects: analyzer, buffer, rate, min_conf (and optional lat/lon/date)
             recording = RecordingBuffer(
                 analyzer,
                 audio_data,
@@ -167,10 +291,11 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
             )
             
             recording.analyze()
+            
             # Log detection results
             num_detections = len(recording.detections) if recording.detections else 0
             if processed_count % 20 == 0 or num_detections > 0:
-                print(f"Worker {worker_id}: Processed sample, detections: {num_detections}")
+                log(f"Worker {worker_id}: Processed sample, detections: {num_detections}")
 
             # Process detections
             if recording.detections:
@@ -182,7 +307,8 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
                     filename = f"{det_time}_{species}_worker{worker_id}.wav"
                     filepath = os.path.join(AUDIO_SAVE_DIR, filename)
                     wav_write(filepath, SAMPLE_RATE, (audio_data * 32767).astype(np.int16))
-                    print(f"Saved detected audio: {filepath}")
+                    log(f"Saved detected audio: {filepath}")
+                    
                     result = {
                         'timestamp': timestamp,
                         'common_name': detection['common_name'],
@@ -196,12 +322,13 @@ def analyzing_worker(samples_queue, results_queue, stop_event, worker_id=0):
             
             processed_count += 1
             if processed_count % 100 == 0:
-                print(f"Worker {worker_id}: Processed {processed_count} samples")
+                log(f"Worker {worker_id}: Processed {processed_count} samples")
         
         except Exception as e:
-            print(f"Error analyzing sample: {e}", file=sys.stderr)
+            log(f"Error analyzing sample: {e}")
+            traceback.print_exc()
     
-    print(f"Analyzing worker {worker_id} stopped after processing {processed_count} samples")
+    log(f"Analyzing worker {worker_id} stopped after processing {processed_count} samples")
 
 
 def database_worker(results_queue, stop_event):
@@ -209,8 +336,12 @@ def database_worker(results_queue, stop_event):
     Pulls detection results from queue and writes to database.
     Batches writes for efficiency and deduplicates detections.
     """
-    print("Database worker started")
-    print(f"Deduplication method: {DEDUP_METHOD}")
+    # Reconfigure stdout/stderr for this process
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+    
+    log("Database worker started")
+    log(f"Deduplication method: {DEDUP_METHOD}")
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -302,12 +433,13 @@ def database_worker(results_queue, stop_event):
                 )
                 conn.commit()
                 written_count += len(batch)
-                print(f"Wrote {len(batch)} detections to database "
-                      f"(total: {written_count}, duplicates skipped: {skipped_count})")
+                log(f"Wrote {len(batch)} detections to database "
+                    f"(total: {written_count}, duplicates skipped: {skipped_count})")
                 batch = []
                 last_commit = time.time()
             except Exception as e:
-                print(f"Error writing to database: {e}", file=sys.stderr)
+                log(f"Error writing to database: {e}")
+                traceback.print_exc()
                 batch = []  # Clear batch to avoid repeated errors
     
     # Write any remaining results
@@ -323,32 +455,35 @@ def database_worker(results_queue, stop_event):
         written_count += len(batch)
     
     conn.close()
-    print(f"Database worker stopped after writing {written_count} detections "
-          f"({skipped_count} duplicates skipped)")
-
+    log(f"Database worker stopped after writing {written_count} detections "
+        f"({skipped_count} duplicates skipped)")
 
 
 def monitor_worker(samples_queue, results_queue, stop_event):
     """
     Monitors queue depths to detect if system is falling behind.
     """
-    print("Monitor worker started")
+    # Reconfigure stdout/stderr for this process
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+    
+    log("Monitor worker started")
     
     while not stop_event.is_set():
         samples_depth = samples_queue.qsize()
         results_depth = results_queue.qsize()
         
         if samples_depth > SAMPLES_QUEUE_SIZE * 0.8:
-            print(f"WARNING: Samples queue is {samples_depth}/{SAMPLES_QUEUE_SIZE} - "
-                  f"analysis may be falling behind!", file=sys.stderr)
+            log(f"WARNING: Samples queue is {samples_depth}/{SAMPLES_QUEUE_SIZE} - "
+                f"analysis may be falling behind!")
         
         if results_depth > RESULTS_QUEUE_SIZE * 0.8:
-            print(f"WARNING: Results queue is {results_depth}/{RESULTS_QUEUE_SIZE} - "
-                  f"database writes may be falling behind!", file=sys.stderr)
+            log(f"WARNING: Results queue is {results_depth}/{RESULTS_QUEUE_SIZE} - "
+                f"database writes may be falling behind!")
         
         time.sleep(10)  # Check every 10 seconds
     
-    print("Monitor worker stopped")
+    log("Monitor worker stopped")
 
 
 def main():
@@ -356,9 +491,9 @@ def main():
     Main coordinator process.
     Sets up database, queues, workers, and handles shutdown.
     """
-    print("=" * 60)
-    print("Bird Call Detection System - Starting")
-    print("=" * 60)
+    log("=" * 60)
+    log("Bird Call Detection System - Starting")
+    log("=" * 60)
     
     # Initialize database
     setup_database()
@@ -372,8 +507,8 @@ def main():
     
     # Determine number of analyzer workers
     # Leave 1 CPU for recording/db/monitor
-    num_analyzers = max(1, cpu_count() - 1)
-    print(f"Starting {num_analyzers} analyzer worker(s)")
+    num_analyzers = 2  # max(1, cpu_count() - 1)
+    log(f"Starting {num_analyzers} analyzer worker(s)")
     
     # Create worker processes
     workers = []
@@ -405,22 +540,32 @@ def main():
     
     # Start all workers
     for worker in workers:
+        log(f"Starting {worker.name}...")
         worker.start()
-        print(f"Started {worker.name}")
+        log(f"Started {worker.name} (PID: {worker.pid})")
+        time.sleep(0.5)  # Small delay between worker starts
     
     # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
-        print("\n" + "=" * 60)
-        print("Shutdown signal received - stopping workers...")
-        print("=" * 60)
+        log("\n" + "=" * 60)
+        log("Shutdown signal received - stopping workers...")
+        log("=" * 60)
         stop_event.set()
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    print("\n" + "=" * 60)
-    print("System running - Press Ctrl+C to stop")
-    print("=" * 60 + "\n")
+    log("\n" + "=" * 60)
+    log("System running - Press Ctrl+C to stop")
+    log("=" * 60 + "\n")
+    
+    # Check if workers are actually running
+    time.sleep(2)
+    for worker in workers:
+        if not worker.is_alive():
+            log(f"ERROR: {worker.name} died immediately after starting!")
+            stop_event.set()
+            break
     
     # Wait for all workers to finish
     try:
@@ -431,12 +576,12 @@ def main():
         for worker in workers:
             worker.join(timeout=5)
             if worker.is_alive():
-                print(f"Force terminating {worker.name}")
+                log(f"Force terminating {worker.name}")
                 worker.terminate()
     
-    print("\n" + "=" * 60)
-    print("Bird Call Detection System - Stopped")
-    print("=" * 60)
+    log("\n" + "=" * 60)
+    log("Bird Call Detection System - Stopped")
+    log("=" * 60)
 
 
 if __name__ == '__main__':
