@@ -32,7 +32,7 @@ app.get('/health', (req, res) => {
 // Proxy API requests to listener
 app.use('/api', async (req, res) => {
   try {
-    const url = new URL(API_URL + req.path);
+    const url = new URL(API_URL + '/api' + req.path);
     // Pass query parameters
     Object.entries(req.query).forEach(([key, value]) => {
       url.searchParams.append(key, value);
