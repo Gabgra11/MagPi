@@ -1,0 +1,8 @@
+numpy>=1.23.0
+PyAudio>=0.2.11
+soundfile>=0.11.0
+scipy>=1.9.0
+flask>=2.3.0
+flask-cors>=4.0.0
+birdnetlib>=0.0.11
+librosa>=0.10.0
