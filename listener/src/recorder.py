@@ -118,11 +118,18 @@ class RecorderWorker:
     
     def _run_real_audio(self):
         """Recording loop with real audio."""
+        logger.info("Starting real audio recording loop")  # ADD THIS LINE
         sample_interval = self.config.sample_duration
         last_sample_time = datetime.utcnow()
         
         while self.running:
             try:
+                # Check if stream is active
+                if not self.stream.is_active():
+                    logger.warning("Stream is not active!")
+                    time.sleep(0.1)
+                    continue
+                
                 # Read chunk from stream
                 data = self.stream.read(self.config.chunk_size, 
                                     exception_on_overflow=False)
