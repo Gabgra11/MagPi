@@ -118,16 +118,15 @@ class RecorderWorker:
     
     def _run_real_audio(self):
         """Recording loop with real audio."""
-        logger.info("Starting real audio recording loop")  # ADD THIS LINE
+        logger.info("Starting real audio recording loop")
         sample_interval = self.config.sample_duration
         last_sample_time = datetime.utcnow()
         
         while self.running:
             try:
-                # Check if stream is active
-                if not self.stream.is_active():
-                    logger.warning("Stream is not active!")
-                    time.sleep(0.1)
+                # Check if there's data available
+                if self.stream.get_read_available() < self.config.chunk_size:
+                    time.sleep(0.01)  # Wait a bit if no data available
                     continue
                 
                 # Read chunk from stream
@@ -143,15 +142,15 @@ class RecorderWorker:
                 elapsed = (now - last_sample_time).total_seconds()
                 
                 buffer_ready = self.audio_buffer.is_ready()
-                logger.info(
+                logger.debug(
                     f"Buffer status: elapsed={elapsed:.2f}s, ready={buffer_ready}, "
                     f"buffer_len={len(self.audio_buffer.buffer)}, needed={self.audio_buffer.sample_size}"
-                ) # TODO: Change back to debug or remove
+                )
                 
                 if elapsed >= sample_interval and buffer_ready:
                     sample = self.audio_buffer.get_sample()
                     if sample is not None:
-                        logger.info(f"Queuing sample for analysis (size: {len(sample)} samples)")  # ADD THIS
+                        logger.info(f"Queuing sample for analysis (size: {len(sample)} samples)")
                         self.samples_queue.put({
                             'audio': sample,
                             'timestamp': now,
@@ -160,7 +159,8 @@ class RecorderWorker:
                         last_sample_time = now
             
             except Exception as e:
-                logger.error(f"Error in recording loop: {e}")
+                logger.error(f"Error in recording loop: {e}", exc_info=True)
+                time.sleep(0.1)
                 continue
     
     def _run_mock_audio(self):
