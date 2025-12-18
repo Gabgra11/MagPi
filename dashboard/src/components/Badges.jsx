@@ -57,7 +57,7 @@ export const BadgesCard = () => {
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
         {earnedBadges.length === 0 ? (
           <p className="col-span-full text-gray-500 text-center py-8">
-            Keep watching to earn badges!
+            No badges yet
           </p>
         ) : (
           earnedBadges.map((badge, idx) => (
