@@ -63,16 +63,22 @@ class BirdNETAnalyzer:
             # Save audio to temporary file for analysis
             import tempfile
             import soundfile as sf
+            import os
             
+            # Create temp file but don't auto-delete
             with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-                sf.write(tmp.name, audio, sample_rate)
+                tmp_path = tmp.name
+            
+            try:
+                # Write audio to temp file
+                sf.write(tmp_path, audio, sample_rate)
                 
                 # Run analysis
                 recording = self.Recording(
-                    tmp.name,
+                    tmp_path,
                     lat=self.config.birdnet_location_lat,
                     lon=self.config.birdnet_location_lon,
-                    week_48=48  # Use week 48 for typical analysis
+                    min_conf=self.config.min_confidence,  # Add this
                 )
                 
                 recording.analyze()
@@ -80,18 +86,25 @@ class BirdNETAnalyzer:
                 # Process results
                 detections = []
                 for detection in recording.detections:
-                    if detection[2] >= self.config.min_confidence:
+                    if detection['confidence'] >= self.config.min_confidence:
                         detections.append({
-                            'species': str(detection[0]),
-                            'confidence': float(detection[2]),
-                            'start_time': float(detection[3]),
-                            'end_time': float(detection[4])
+                            'species': str(detection['scientific_name']),
+                            'confidence': float(detection['confidence']),
+                            'start_time': float(detection['start_time']),
+                            'end_time': float(detection['end_time'])
                         })
                 
+                logger.info(f"BirdNET found {len(detections)} detections")
                 return detections
+            
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
         
         except Exception as e:
-            logger.error(f"Error in analysis: {e}")
+            logger.error(f"Error in analysis: {e}", exc_info=True)
             return []
     
     def _mock_analyze(self, audio: np.ndarray, sample_rate: int) -> list:
