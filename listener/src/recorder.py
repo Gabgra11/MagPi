@@ -125,7 +125,7 @@ class RecorderWorker:
             try:
                 # Read chunk from stream
                 data = self.stream.read(self.config.chunk_size, 
-                                       exception_on_overflow=False)
+                                    exception_on_overflow=False)
                 chunk = np.frombuffer(data, dtype=np.float32)
                 
                 # Add to buffer
@@ -135,9 +135,14 @@ class RecorderWorker:
                 now = datetime.utcnow()
                 elapsed = (now - last_sample_time).total_seconds()
                 
-                if elapsed >= sample_interval and self.audio_buffer.is_ready():
+                # ADD THIS DEBUG LOGGING
+                buffer_ready = self.audio_buffer.is_ready()
+                logger.debug(f"Buffer status: elapsed={elapsed:.2f}s, ready={buffer_ready}, buffer_len={len(self.audio_buffer.buffer)}, needed={self.audio_buffer.sample_size}")
+                
+                if elapsed >= sample_interval and buffer_ready:
                     sample = self.audio_buffer.get_sample()
                     if sample is not None:
+                        logger.info(f"Queuing sample for analysis (size: {len(sample)} samples)")  # ADD THIS
                         self.samples_queue.put({
                             'audio': sample,
                             'timestamp': now,
