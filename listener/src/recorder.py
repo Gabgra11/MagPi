@@ -135,7 +135,6 @@ class RecorderWorker:
                 now = datetime.utcnow()
                 elapsed = (now - last_sample_time).total_seconds()
                 
-                # ADD THIS DEBUG LOGGING
                 buffer_ready = self.audio_buffer.is_ready()
                 logger.debug(f"Buffer status: elapsed={elapsed:.2f}s, ready={buffer_ready}, buffer_len={len(self.audio_buffer.buffer)}, needed={self.audio_buffer.sample_size}")
                 

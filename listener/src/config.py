@@ -91,18 +91,33 @@ def setup_logging(log_level: str = "INFO") -> logging.Logger:
     """Setup logging configuration."""
     
     logger = logging.getLogger("magpi-listener")
-    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-    
-    # Console handler
-    ch = logging.StreamHandler()
-    ch.setLevel(getattr(logging, log_level.upper(), logging.INFO))
-    
-    # Formatter
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
-    ch.setFormatter(formatter)
-    
-    logger.addHandler(ch)
-    
+    level = getattr(logging, log_level.upper(), logging.INFO)
+
+    # Configure the named logger
+    logger.setLevel(level)
+    logger.propagate = False
+
+    # Add a console handler only if none exists to avoid duplicate logs
+    if not logger.handlers:
+        ch = logging.StreamHandler()
+        ch.setLevel(level)
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+
+    # Also ensure the root logger is at least at the requested level so
+    # library logs and propagation don't accidentally hide debug messages.
+    root_logger = logging.getLogger()
+    try:
+        # Only raise root level if it's higher (less verbose) than requested
+        if root_logger.level > level:
+            root_logger.setLevel(level)
+    except Exception:
+        # Defensive: ignore if root logger can't be changed
+        pass
+
+    logger.debug(f"Logging configured (level={logging.getLevelName(level)})")
+
     return logger
