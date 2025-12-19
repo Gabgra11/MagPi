@@ -100,7 +100,7 @@ class BirdNETAnalyzer:
                             'end_time': float(detection['end_time'])
                         })
                 
-                logger.info(f"BirdNET found {len(detections)} detections")
+                logger.debug(f"BirdNET found {len(detections)} detections")
                 return detections
             
             finally:

@@ -150,7 +150,7 @@ class RecorderWorker:
                 if elapsed >= sample_interval and buffer_ready:
                     sample = self.audio_buffer.get_sample()
                     if sample is not None:
-                        logger.info(f"Queuing sample for analysis (size: {len(sample)} samples)")
+                        logger.debug(f"Queuing sample for analysis (size: {len(sample)} samples)")
                         self.samples_queue.put({
                             'audio': sample,
                             'timestamp': now,
