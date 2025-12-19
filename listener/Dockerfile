@@ -19,6 +19,21 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Trigger BirdNET-Lite model download at image build time.
+RUN python - <<'PY'
+import pathlib, sys
+try:
+    import birdnetlib
+    base = pathlib.Path(birdnetlib.__file__).parent
+    model_dir = base / 'models' / 'lite'
+    model_dir.mkdir(parents=True, exist_ok=True)
+    from birdnetlib.analyzer_lite import LiteAnalyzer
+    LiteAnalyzer()
+except Exception as e:
+    print('ERROR during LiteAnalyzer initialization:', e, file=sys.stderr)
+    raise
+PY
+
 # Copy application code
 COPY src/ ./src/
 
