@@ -30,12 +30,16 @@ class BirdNETAnalyzer:
                 return
             
             from birdnetlib import Recording
+            from birdnetlib.analyzer_lite import LiteAnalyzer
+
+            self.lite_analyzer = LiteAnalyzer()
             self.Recording = Recording
             logger.info("BirdNET-Lite loaded successfully")
             
         except ImportError:
             logger.warning("BirdNET-Lite not available, using mock analyzer")
             self.Recording = None
+            self.lite_analyzer = None
     
     def analyze(self, audio: np.ndarray, sample_rate: int) -> list:
         """
@@ -73,12 +77,14 @@ class BirdNETAnalyzer:
                 # Write audio to temp file
                 sf.write(tmp_path, audio, sample_rate)
                 
-                # Run analysis
+                # Run analysis. Recording expects the analyzer instance as the
+                # first argument, then the path to the audio file.
                 recording = self.Recording(
+                    self.lite_analyzer,
                     tmp_path,
                     lat=self.config.birdnet_location_lat,
                     lon=self.config.birdnet_location_lon,
-                    min_conf=self.config.min_confidence,  # Add this
+                    min_conf=self.config.min_confidence,
                 )
                 
                 recording.analyze()
